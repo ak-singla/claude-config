@@ -54,6 +54,21 @@ if ! command -v claude >/dev/null 2>&1; then
   warn "Continuing — settings will be staged for when you install it."
 fi
 
+# Plugin runtime advisories (non-fatal). Some plugins have their own runtime
+# prereqs that the installer can't satisfy from settings.json alone. Warn
+# loudly so missing runtimes don't manifest later as cryptic hook errors.
+# Per the safety invariant in CLAUDE.md, we never make these required deps.
+if jq -e '.enabledPlugins["claude-mem@thedotmack"] == true' "${REPO_SETTINGS}" >/dev/null 2>&1; then
+  if ! command -v bun >/dev/null 2>&1 && [[ ! -x "${HOME}/.bun/bin/bun" ]]; then
+    warn "claude-mem is enabled but 'bun' is not on PATH."
+    warn "Its hooks (Stop, SessionStart, PostToolUse, etc.) will fail until installed."
+    warn "Install:  curl -fsSL https://bun.sh/install | bash"
+    warn "Then add this to ~/.zprofile (login shells must see bun for hooks):"
+    warn '    export BUN_INSTALL="$HOME/.bun"'
+    warn '    export PATH="$BUN_INSTALL/bin:$PATH"'
+  fi
+fi
+
 mkdir -p "${CLAUDE_DIR}"
 
 # 2. Decide whether to do interactive merge ----------------------------------

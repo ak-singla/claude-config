@@ -43,7 +43,7 @@ Both `install.sh` and `install.ps1` MUST stay in lockstep. If you change one, ch
 
 **Default mode** (interactive merge):
 
-1. Sanity-check tooling (`jq` on bash; `claude` CLI presence is a warn, not a fail).
+1. Sanity-check tooling (`jq` on bash; `claude` CLI presence is a warn, not a fail). Then run **plugin-runtime advisories** — for each enabled plugin with a known external runtime requirement, warn (don't fail) if the runtime is missing. Currently: `claude-mem@thedotmack` requires `bun` (its hooks shell out via `scripts/bun-runner.js`, which hard-errors if bun isn't found). The installer reads the repo `settings.json` to decide which advisories apply, so adding/removing a plugin from `enabledPlugins` automatically toggles its advisory.
 2. Detect existing `~/.claude/settings.json`. If it exists, isn't already our symlink, and parses as JSON, run merge.
 3. Merge: diff `enabledPlugins` (where value === `true`) between machine and repo. Prompt per plugin in machine-only set with options `[k] keep / [d] drop / [a] keep-all / [s] skip-all`. Default on empty input is keep.
 4. For each kept plugin: write the entry into the **repo's** `settings.json`. If the plugin's marketplace name (the part after `@`) isn't in repo's `extraKnownMarketplaces` but IS in machine's, copy the marketplace registration too.
@@ -122,7 +122,7 @@ These are anticipated based on the design conversation that produced this repo. 
 
 - Don't add Anthropic-internal URLs, MCP server endpoints, or anything that would only work for one company. This is a public personal repo.
 - Don't add features that require running the installer to take effect for *existing* users — every change should work on first install AND on `git pull` + Claude Code restart of an already-installed setup.
-- Don't introduce required dependencies beyond `jq` (bash) and built-ins (PowerShell). If something needs Python, Node, or Go to run, it doesn't belong in the installer path.
+- Don't introduce required dependencies beyond `jq` (bash) and built-ins (PowerShell). If something needs Python, Node, or Go to run, it doesn't belong in the installer path. **Plugin runtime requirements** (e.g. `bun` for `claude-mem`) are the exception path: surface them as **non-fatal advisories** in step 1 of the installer, document them in the README "Optional: plugin runtimes" table, and let the user install the runtime themselves. The installer must still complete cleanly when the runtime is missing.
 - Don't write to `~/.claude/` outside of `settings.json` and the timestamped backup file. The rest of that directory is Claude Code's, not ours.
 - Don't break `--dry-run`. Every code path that would write or mutate state must be guarded by the dry-run check.
 

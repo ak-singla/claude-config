@@ -49,6 +49,23 @@ Verify with `/plugin` — all five plugins should show as enabled.
 
 > Requires `jq` on macOS/Linux (`brew install jq` or `sudo apt install jq`). PowerShell uses built-ins; nothing extra needed on Windows.
 
+### Optional: plugin runtimes
+
+Some plugins ship hooks that need a runtime the installer can't provide. Install whichever apply to plugins you've enabled:
+
+| Plugin | Runtime | Install |
+| --- | --- | --- |
+| `claude-mem` | [Bun](https://bun.sh) | `curl -fsSL https://bun.sh/install \| bash` (mac/linux) — or `irm bun.sh/install.ps1 \| iex` (Windows) |
+
+> **macOS gotcha:** Bun's installer writes the PATH export to `~/.zshrc`, but Claude Code hooks spawn non-interactive login shells, which read `~/.zprofile` instead. Add this to `~/.zprofile` as well:
+>
+> ```bash
+> export BUN_INSTALL="$HOME/.bun"
+> export PATH="$BUN_INSTALL/bin:$PATH"
+> ```
+>
+> Without this, `claude-mem`'s Stop hook fails on every turn with `Bun not found`. The installer warns when bun is missing and `claude-mem` is enabled.
+
 ---
 
 ## Merge mode (the smart bit)

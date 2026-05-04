@@ -26,17 +26,5 @@
     "frontend-design@claude-plugins-official": true,
     "context-mode@context-mode": true,
     "claude-mem@thedotmack": true
-  },
-  "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"/Users/apple/.claude/hooks/context-mode-cache-heal.mjs\""
-          }
-        ]
-      }
-    ]
   }
 }

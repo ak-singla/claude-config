@@ -70,6 +70,26 @@ if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
     Write-Warn2 "Continuing — settings will be staged for when you install it."
 }
 
+# Plugin runtime advisories (non-fatal). Some plugins have their own runtime
+# prereqs that the installer can't satisfy from settings.json alone. Warn
+# loudly so missing runtimes don't manifest later as cryptic hook errors.
+# Per the safety invariant in CLAUDE.md, we never make these required deps.
+try {
+    $repoForCheck = Read-JsonFile $RepoSettings
+    if ($repoForCheck.enabledPlugins -and $repoForCheck.enabledPlugins['claude-mem@thedotmack'] -eq $true) {
+        $bunOnPath  = [bool](Get-Command bun -ErrorAction SilentlyContinue)
+        $bunInHome  = Test-Path (Join-Path $HOME ".bun\bin\bun.exe")
+        if (-not $bunOnPath -and -not $bunInHome) {
+            Write-Warn2 "claude-mem is enabled but 'bun' is not on PATH."
+            Write-Warn2 "Its hooks (Stop, SessionStart, PostToolUse, etc.) will fail until installed."
+            Write-Warn2 "Install:  powershell -c ""irm bun.sh/install.ps1 | iex"""
+            Write-Warn2 "Then restart your shell so PATH picks up %USERPROFILE%\.bun\bin."
+        }
+    }
+} catch {
+    # Best-effort check; don't block install if settings.json is unreadable.
+}
+
 if (-not (Test-Path $ClaudeDir)) {
     New-Item -ItemType Directory -Path $ClaudeDir | Out-Null
 }
