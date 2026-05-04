@@ -1,0 +1,14 @@
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor junk
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local-only Claude overrides (never commit machine-specific state)
+settings.local.json
+*.backup-*
