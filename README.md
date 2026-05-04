@@ -82,9 +82,9 @@ The kept plugins are now staged git changes. Commit + push and the next `git pul
 | `--no-merge` | Alias for `--force` (Linux/macOS only). |
 | `--dry-run` / `-DryRun` | Show what would change. Don't write anything. |
 
-### What about non-plugin keys?
+### What about non-plugin keys (and dropped plugins)?
 
-If your existing `settings.json` has other top-level keys (`hooks`, `permissions`, `model`, etc.), the installer **does not** auto-merge those — they're often machine-specific. It lists them and recommends moving them to `~/.claude/settings.local.json`, which Claude Code loads alongside our symlinked file. That file is gitignored here by default.
+If your existing `settings.json` has other top-level keys (`hooks`, `permissions`, `statusLine`, `theme`, etc.) — or if you `[d]rop`ped a plugin during the merge prompt — the installer **does not** silently lose them. It prints a ready-to-paste suggested `~/.claude/settings.local.json` covering all of it (dropped plugins with their marketplace registrations, any orphan machine-only marketplaces, and the non-plugin keys). The script never writes that file for you — copy-paste keeps you in control, and Claude Code loads `settings.local.json` alongside the symlinked team file. `settings.local.json` is gitignored by default.
 
 ---
 

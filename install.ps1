@@ -108,6 +108,7 @@ if ($DoMerge) {
 
     $machineOnly = @($machinePlugins | Where-Object { $_ -notin $repoPlugins })
 
+    $kept = @()
     if ($machineOnly.Count -eq 0) {
         Write-Ok "No machine-only plugins. Repo already covers everything you have enabled."
     } else {
@@ -117,7 +118,6 @@ if ($DoMerge) {
 
         $keepAll = $false
         $skipAll = $false
-        $kept    = @()
 
         foreach ($p in $machineOnly) {
             if ($keepAll) { $kept += $p; continue }
@@ -125,18 +125,12 @@ if ($DoMerge) {
 
             while ($true) {
                 Write-Host "  $p"
-                $choice = Read-Host "    [k] keep (merge into repo)  [d] drop  [a] keep-all  [s] skip-all"
-                switch -Regex ($choice.ToLower()) {
-                    '^k?$' { $kept += $p; break }
-                    '^d$'  { break }
-                    '^a$'  { $keepAll = $true; $kept += $p; break }
-                    '^s$'  { $skipAll = $true; break }
-                    default {
-                        Write-Host "    Please answer k/d/a/s."
-                        continue
-                    }
-                }
-                break
+                $choice = (Read-Host "    [k] keep (merge into repo)  [d] drop  [a] keep-all  [s] skip-all").ToLower()
+                if ($choice -eq '' -or $choice -eq 'k') { $kept += $p; break }
+                elseif ($choice -eq 'd') { break }
+                elseif ($choice -eq 'a') { $keepAll = $true; $kept += $p; break }
+                elseif ($choice -eq 's') { $skipAll = $true; break }
+                else { Write-Host "    Please answer k/d/a/s." }
             }
         }
 
@@ -172,16 +166,59 @@ if ($DoMerge) {
                 Write-Warn2 "-> then ``git pull`` on your other machines to receive these."
             }
         }
+    }
 
-        $reservedKeys = @('enabledPlugins','extraKnownMarketplaces','skippedMarketplaces','skippedPlugins')
-        $otherKeys = @($machine.Keys | Where-Object { $_ -notin $reservedKeys })
-        if ($otherKeys.Count -gt 0) {
-            Write-Host ""
-            Write-Warn2 "Existing settings.json has other top-level keys we won't merge:"
-            foreach ($k in $otherKeys) { Write-Host "      • $k" }
-            Write-Warn2 "Move anything machine-specific to ~/.claude/settings.local.json (gitignored)."
-            Write-Warn2 "It will load alongside our symlinked settings.json."
+    # Build a suggested settings.local.json from anything in the machine's old
+    # settings that doesn't belong in the team repo: dropped plugins (+ their
+    # marketplace registrations), orphan machine-only marketplaces, and any
+    # non-plugin top-level keys (hooks, permissions, statusLine, theme, etc.).
+    $dropped = @($machineOnly | Where-Object { $_ -notin $kept })
+
+    $reservedKeys = @('enabledPlugins','extraKnownMarketplaces','skippedMarketplaces','skippedPlugins')
+    $otherKeys = @($machine.Keys | Where-Object { $_ -notin $reservedKeys })
+
+    $extraMarkets = [ordered]@{}
+    if ($machine.extraKnownMarketplaces) {
+        foreach ($mk in $machine.extraKnownMarketplaces.Keys) {
+            if (-not $repo.extraKnownMarketplaces -or -not $repo.extraKnownMarketplaces.ContainsKey($mk)) {
+                $extraMarkets[$mk] = $machine.extraKnownMarketplaces[$mk]
+            }
         }
+    }
+
+    if ($dropped.Count -gt 0 -or $otherKeys.Count -gt 0 -or $extraMarkets.Count -gt 0) {
+        Write-Host ""
+        if ($otherKeys.Count -gt 0) {
+            Write-Warn2 "Non-plugin top-level keys found (these belong in settings.local.json, not the team repo):"
+            foreach ($k in $otherKeys) { Write-Host "      • $k" }
+        }
+        if ($dropped.Count -gt 0) {
+            Write-Warn2 "Dropped plugins (preserved below so you can keep them locally):"
+            foreach ($p in $dropped) { Write-Host "      • $p" }
+        }
+
+        $suggestion = [ordered]@{}
+        if ($extraMarkets.Count -gt 0) {
+            $suggestion.extraKnownMarketplaces = $extraMarkets
+        }
+        if ($dropped.Count -gt 0) {
+            $droppedPlugins = [ordered]@{}
+            foreach ($id in $dropped) { $droppedPlugins[$id] = $true }
+            $suggestion.enabledPlugins = $droppedPlugins
+        }
+        foreach ($k in $otherKeys) {
+            $suggestion[$k] = $machine[$k]
+        }
+
+        $localPath = Join-Path $ClaudeDir "settings.local.json"
+        Write-Host ""
+        if (Test-Path $localPath) {
+            Write-Info "Merge this snippet into your existing $localPath"
+        } else {
+            Write-Info "Suggested $localPath (create the file and paste this)"
+        }
+        $suggestionJson = $suggestion | ConvertTo-Json -Depth 12
+        $suggestionJson.Split("`n") | ForEach-Object { Write-Host "      $_" }
     }
     Write-Host ""
 }
@@ -226,18 +263,57 @@ if (-not (Test-Path $SettingsPath)) {
 }
 
 # 5. Side-channel installers -------------------------------------------------
+# These can write to ~/.claude/settings.json -- which is now a symlink (or
+# copy) to the team repo. Their additions are typically machine-specific
+# (absolute paths, Node version, etc.) and must NOT be committed. Snapshot
+# the repo file beforehand, run the installer, diff what it added, restore
+# the repo file, and emit the additions as a settings.local.json suggestion.
 Write-Host ""
 Write-Bold "Running side-channel installers"
 if (Get-Command npx -ErrorAction SilentlyContinue) {
     if ($DryRun) {
         Write-Info "(dry-run) would run: npx --yes get-shit-done-cc --claude --global"
+        Write-Info "(dry-run) any settings.json keys it added would be captured and offered as a settings.local.json suggestion; the team repo file would stay clean"
     } else {
+        $snapshot = [System.IO.Path]::GetTempFileName()
+        Copy-Item -Path $RepoSettings -Destination $snapshot -Force
+
         Write-Info "Installing get-shit-done-cc (global)..."
         try {
             npx --yes get-shit-done-cc --claude --global
-            Write-Ok "get-shit-done-cc done"
         } catch {
             Write-Warn2 "get-shit-done-cc install failed (non-fatal)"
+        }
+
+        # Diff: top-level keys in post that differ from pre (deep comparison via JSON).
+        $pre  = Read-JsonFile $snapshot
+        $post = Read-JsonFile $RepoSettings
+        $sideAdds = [ordered]@{}
+        foreach ($k in $post.Keys) {
+            $preVal  = $pre[$k]
+            $postVal = $post[$k]
+            $preJson  = if ($null -eq $preVal)  { $null } else { ConvertTo-Json $preVal  -Depth 12 -Compress }
+            $postJson = if ($null -eq $postVal) { $null } else { ConvertTo-Json $postVal -Depth 12 -Compress }
+            if ($preJson -ne $postJson) { $sideAdds[$k] = $postVal }
+        }
+
+        # Restore the team repo file regardless of what the installer wrote.
+        Copy-Item -Path $snapshot -Destination $RepoSettings -Force
+        Remove-Item -Path $snapshot -Force
+
+        if ($sideAdds.Count -gt 0) {
+            Write-Ok "get-shit-done-cc installed (machine-specific additions captured below)."
+            Write-Host ""
+            $localPath = Join-Path $ClaudeDir "settings.local.json"
+            Write-Warn2 "Side-channel installer wrote machine-specific keys to settings.json."
+            Write-Warn2 "Restored the team repo file. Add these to $localPath"
+            if (Test-Path $localPath) {
+                Write-Warn2 "($localPath already exists -- merge the keys below into it)"
+            }
+            $addsJson = $sideAdds | ConvertTo-Json -Depth 12
+            $addsJson.Split("`n") | ForEach-Object { Write-Host "      $_" }
+        } else {
+            Write-Ok "get-shit-done-cc done"
         }
     }
 } else {

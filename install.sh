@@ -29,7 +29,7 @@ for arg in "$@"; do
     --force|--no-merge) FORCE=1 ;;
     --dry-run)          DRY_RUN=1 ;;
     -h|--help)
-      sed -n '2,16p' "$0" | sed 's/^# \?//'
+      sed -n '2,16p' "$0" | sed -E 's/^#[[:space:]]?//'
       exit 0
       ;;
     *) echo "Unknown flag: $arg" >&2; exit 2 ;;
@@ -70,22 +70,26 @@ fi
 if [[ ${DO_MERGE} -eq 1 ]]; then
   bold "Comparing existing settings against repo"
 
-  mapfile -t MACHINE_PLUGINS < <(
-    jq -r '.enabledPlugins // {} | to_entries[] | select(.value == true) | .key' "${SETTINGS_PATH}"
-  )
-  mapfile -t REPO_PLUGINS < <(
-    jq -r '.enabledPlugins // {} | to_entries[] | select(.value == true) | .key' "${REPO_SETTINGS}"
-  )
+  MACHINE_PLUGINS=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && MACHINE_PLUGINS+=("$line")
+  done < <(jq -r '.enabledPlugins // {} | to_entries[] | select(.value == true) | .key' "${SETTINGS_PATH}")
+
+  REPO_PLUGINS=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && REPO_PLUGINS+=("$line")
+  done < <(jq -r '.enabledPlugins // {} | to_entries[] | select(.value == true) | .key' "${REPO_SETTINGS}")
 
   MACHINE_ONLY=()
-  for p in "${MACHINE_PLUGINS[@]}"; do
+  for p in ${MACHINE_PLUGINS[@]+"${MACHINE_PLUGINS[@]}"}; do
     found=0
-    for q in "${REPO_PLUGINS[@]}"; do
+    for q in ${REPO_PLUGINS[@]+"${REPO_PLUGINS[@]}"}; do
       [[ "$p" == "$q" ]] && { found=1; break; }
     done
     [[ $found -eq 0 ]] && MACHINE_ONLY+=("$p")
   done
 
+  KEPT=()
   if [[ ${#MACHINE_ONLY[@]} -eq 0 ]]; then
     ok "No machine-only plugins. Repo already covers everything you have enabled."
   else
@@ -95,7 +99,6 @@ if [[ ${DO_MERGE} -eq 1 ]]; then
 
     KEEP_ALL=0
     SKIP_ALL=0
-    KEPT=()
     for p in "${MACHINE_ONLY[@]}"; do
       if [[ ${KEEP_ALL} -eq 1 ]]; then KEPT+=("$p"); continue; fi
       if [[ ${SKIP_ALL} -eq 1 ]]; then continue; fi
@@ -104,7 +107,8 @@ if [[ ${DO_MERGE} -eq 1 ]]; then
         printf "  %s\n" "$p"
         printf "    [k] keep (merge into repo)  [d] drop  [a] keep-all  [s] skip-all : "
         read -r choice </dev/tty
-        case "${choice,,}" in
+        choice_lc=$(printf '%s' "$choice" | tr '[:upper:]' '[:lower:]')
+        case "$choice_lc" in
           k|"") KEPT+=("$p"); break ;;
           d)    break ;;
           a)    KEEP_ALL=1; KEPT+=("$p"); break ;;
@@ -148,18 +152,77 @@ if [[ ${DO_MERGE} -eq 1 ]]; then
         warn "→ then \`git pull\` on your other machines to receive these."
       fi
     fi
+  fi
 
-    OTHER_KEYS=$(jq -r '
-      del(.enabledPlugins, .extraKnownMarketplaces, .skippedMarketplaces, .skippedPlugins)
-      | keys[]?
-    ' "${SETTINGS_PATH}")
+  # Build a suggested settings.local.json from anything in the machine's old
+  # settings that doesn't belong in the team repo: dropped plugins (+ their
+  # marketplace registrations), orphan machine-only marketplaces, and any
+  # non-plugin top-level keys (hooks, permissions, statusLine, theme, etc.).
+  DROPPED=()
+  for p in ${MACHINE_ONLY[@]+"${MACHINE_ONLY[@]}"}; do
+    found=0
+    for q in ${KEPT[@]+"${KEPT[@]}"}; do
+      [[ "$p" == "$q" ]] && { found=1; break; }
+    done
+    [[ $found -eq 0 ]] && DROPPED+=("$p")
+  done
+
+  OTHER_KEYS=$(jq -r '
+    del(.enabledPlugins, .extraKnownMarketplaces, .skippedMarketplaces, .skippedPlugins)
+    | keys[]?
+  ' "${SETTINGS_PATH}")
+
+  EXTRA_MARKETS_COUNT=$(jq -r '
+    ((.extraKnownMarketplaces // {}) | keys) as $mk
+    | $mk | length
+  ' "${SETTINGS_PATH}")
+  REPO_MARKETS_JSON=$(jq -r '(.extraKnownMarketplaces // {}) | keys' "${REPO_SETTINGS}")
+  MACHINE_ONLY_MARKETS=$(jq -r --argjson repoKeys "$REPO_MARKETS_JSON" '
+    ((.extraKnownMarketplaces // {}) | keys)
+    | map(select(. as $k | $repoKeys | index($k) | not))
+    | .[]?
+  ' "${SETTINGS_PATH}")
+
+  if [[ ${#DROPPED[@]} -gt 0 || -n "${OTHER_KEYS}" || -n "${MACHINE_ONLY_MARKETS}" ]]; then
+    echo
     if [[ -n "${OTHER_KEYS}" ]]; then
-      echo
-      warn "Existing settings.json has other top-level keys we won't merge:"
+      warn "Non-plugin top-level keys found (these belong in settings.local.json, not the team repo):"
       echo "${OTHER_KEYS}" | sed 's/^/      • /'
-      warn "Move anything machine-specific to ~/.claude/settings.local.json (gitignored)."
-      warn "It will load alongside our symlinked settings.json."
     fi
+    if [[ ${#DROPPED[@]} -gt 0 ]]; then
+      warn "Dropped plugins (preserved below so you can keep them locally):"
+      for p in "${DROPPED[@]}"; do echo "      • $p"; done
+    fi
+
+    if [[ ${#DROPPED[@]} -gt 0 ]]; then
+      DROPPED_JSON=$(printf '%s\n' "${DROPPED[@]}" | jq -R . | jq -s .)
+    else
+      DROPPED_JSON='[]'
+    fi
+
+    SUGGESTED=$(jq -n \
+      --slurpfile machine "${SETTINGS_PATH}" \
+      --slurpfile repo "${REPO_SETTINGS}" \
+      --argjson dropped "$DROPPED_JSON" '
+        ($machine[0]) as $m
+        | ($repo[0])    as $r
+        | ($m | del(.enabledPlugins, .extraKnownMarketplaces, .skippedMarketplaces, .skippedPlugins)) as $other
+        | ($dropped | map({(.): true}) | add // {}) as $droppedPlugins
+        | (($m.extraKnownMarketplaces // {})
+           | with_entries(select(($r.extraKnownMarketplaces // {})[.key] == null))) as $extraMarkets
+        | (if ($extraMarkets   | length) > 0 then {extraKnownMarketplaces: $extraMarkets}   else {} end)
+        + (if ($droppedPlugins | length) > 0 then {enabledPlugins:        $droppedPlugins} else {} end)
+        + $other
+      ')
+
+    LOCAL_PATH="${CLAUDE_DIR}/settings.local.json"
+    echo
+    if [[ -e "${LOCAL_PATH}" ]]; then
+      info "Merge this into your existing ${LOCAL_PATH}:"
+    else
+      info "Suggested ${LOCAL_PATH} (create the file and paste this):"
+    fi
+    echo "${SUGGESTED}" | sed 's/^/      /'
   fi
   echo
 fi
@@ -189,15 +252,49 @@ if [[ ! -L "${SETTINGS_PATH}" && ! -e "${SETTINGS_PATH}" ]]; then
 fi
 
 # 5. Side-channel installers (npm-based, not marketplace plugins) ------------
+# These can write to ~/.claude/settings.json — which is now a symlink to the
+# team repo. Their additions are typically machine-specific (absolute paths,
+# Node Cellar version, etc.) and must NOT be committed. Snapshot the repo
+# file beforehand, run the installer, diff what it added, restore the repo
+# file, and emit the additions as a settings.local.json suggestion.
 echo
 bold "Running side-channel installers"
 if command -v npx >/dev/null 2>&1; then
   if [[ ${DRY_RUN} -eq 1 ]]; then
     info "(dry-run) would run: npx --yes get-shit-done-cc --claude --global"
+    info "(dry-run) any settings.json keys it added would be captured and offered as a settings.local.json suggestion; the team repo file would stay clean"
   else
+    SNAPSHOT=$(mktemp)
+    cp "${REPO_SETTINGS}" "${SNAPSHOT}"
+
     info "Installing get-shit-done-cc (global)…"
     npx --yes get-shit-done-cc --claude --global || warn "get-shit-done-cc install failed (non-fatal)"
-    ok "get-shit-done-cc done"
+
+    # Diff: top-level keys in post that differ from pre (deep comparison).
+    SIDE_ADDS=$(jq -n \
+      --slurpfile pre  "${SNAPSHOT}" \
+      --slurpfile post "${REPO_SETTINGS}" '
+        ($pre[0]) as $a | ($post[0]) as $b
+        | $b | with_entries(select(($a[.key] // null) != .value))
+      ')
+
+    # Restore the team repo file regardless of what the installer wrote.
+    cp "${SNAPSHOT}" "${REPO_SETTINGS}"
+    rm -f "${SNAPSHOT}"
+
+    if [[ -n "${SIDE_ADDS}" && "${SIDE_ADDS}" != "{}" ]]; then
+      ok "get-shit-done-cc installed (machine-specific additions captured below)."
+      echo
+      LOCAL_PATH="${CLAUDE_DIR}/settings.local.json"
+      warn "Side-channel installer wrote machine-specific keys to settings.json."
+      warn "Restored the team repo file. Add these to ${LOCAL_PATH}:"
+      if [[ -e "${LOCAL_PATH}" ]]; then
+        warn "(${LOCAL_PATH} already exists — merge the keys below into it)"
+      fi
+      echo "${SIDE_ADDS}" | sed 's/^/      /'
+    else
+      ok "get-shit-done-cc done"
+    fi
   fi
 else
   warn "npx not found — skipping get-shit-done-cc. Install Node.js to enable."
