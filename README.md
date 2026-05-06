@@ -66,6 +66,16 @@ Some plugins ship hooks that need a runtime the installer can't provide. Install
 >
 > Without this, `claude-mem`'s Stop hook fails on every turn with `Bun not found`. The installer warns when bun is missing and `claude-mem` is enabled.
 
+### Optional: external MCP tools
+
+External MCP servers worth layering on top — not bundled because they aren't marketplace plugins, have heavier runtime requirements, or carry per-repo state. Each ships its own installer that registers itself with Claude Code.
+
+| Tool | What it does | Requires | Install |
+| --- | --- | --- | --- |
+| [`code-review-graph`](https://github.com/tirth8205/code-review-graph) | Tree-sitter structural index served via MCP — feeds the assistant precise context instead of letting it re-read whole files (~8x token reduction on large repos) | Python 3.10+ (recommend [`uv`](https://docs.astral.sh/uv/)) | `pip install code-review-graph && code-review-graph install --platform claude-code`, then `code-review-graph build` once per repo |
+
+> **Symlink gotcha.** Tools that auto-write MCP config may target `~/.claude/settings.json` — which is symlinked to this repo's `settings.json`. If the tool adds an `mcpServers` block there, **move it to `~/.claude/settings.local.json`** before committing anything. MCP server entries are machine-specific (absolute paths, per-repo `--repo` flags, venv binaries) and must not propagate via git. The repo's `.gitignore` excludes `settings.local.json` for exactly this reason.
+
 ---
 
 ## Merge mode (the smart bit)
